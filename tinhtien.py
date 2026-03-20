@@ -1,108 +1,126 @@
-import os
-import logging
-
-# Reduce Streamlit warning noise for bare mode execution
-os.environ.setdefault("STREAMLIT_LOG_LEVEL", "error")
-logging.getLogger("streamlit").setLevel(logging.ERROR)
-
 import streamlit as st
+from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime, timedelta
 
-# Cấu hình trang
-st.set_page_config(page_title="Quản Lý Đội Bóng 2026", layout="wide")
+# --- CẤU HÌNH TRANG ---
+st.set_page_config(page_title="Quản Lý Đội Bóng FC Thứ 4", layout="wide")
 
-# 1. TẠO DỮ LIỆU CÁC NGÀY THỨ 4 NĂM 2026
-def get_wednesdays(year):
+# Kết nối Google Sheets
+conn = st.connection("gsheets", type=GSheetsConnection)
+
+# --- HÀM HỖ TRỢ ---
+def get_all_wednesdays(year):
     d = datetime(year, 1, 1)
     d += timedelta(days=(2 - d.weekday() + 7) % 7)
-    dates = []
     while d.year == year:
-        dates.append(d)
+        yield d.strftime('%d/%m/%Y')
         d += timedelta(days=7)
-    return dates
 
-all_wed_2026 = get_wednesdays(2026)
-date_strings = [d.strftime('%d/%m/%Y') for d in all_wed_2026]
+wednesdays_2026 = list(get_all_wednesdays(2026))
+# Cập nhật danh sách thành viên cố định của Duyên tại đây
+fixed_members = ["Dũng", "Nam", "Hoàng", "Tuấn", "Minh", "Đức", "Sơn", "Hải"]
 
-# 2. DANH SÁCH THÀNH VIÊN
-members = ["Dũng", "Nam", "Hoàng", "Tuấn", "Minh", "Đức", "Sơn", "Hải"]
+# Tải dữ liệu và xử lý ép kiểu
+@st.cache_data(ttl=5) 
+def load_data():
+    try:
+        df = conn.read(worksheet="Data", ttl="0")
+        if df.empty:
+            return pd.DataFrame(columns=["Ngày", "Thanh_vien", "Trang_thai", "Ghi_chu"])
+        
+        # BƯỚC QUAN TRỌNG: Ép kiểu để tránh lỗi Checkbox FLOAT
+        df["Trang_thai"] = df["Trang_thai"].map({1: True, 0: False, "TRUE": True, "FALSE": False, True: True, False: False})
+        df["Trang_thai"] = df["Trang_thai"].fillna(False).astype(bool)
+        return df
+    except:
+        return pd.DataFrame(columns=["Ngày", "Thanh_vien", "Trang_thai", "Ghi_chu"])
 
-# 3. KHỞI TẠO SESSION STATE (LƯU TRỮ TẠM THỜI)
-if 'df_ball' not in st.session_state:
-    data = {"Thành viên": members}
-    for ds in date_strings:
-        data[ds] = False
-    st.session_state.df_ball = pd.DataFrame(data)
-    st.session_state.df_ball["Ghi chú"] = ""
+df_master = load_data()
 
-# --- GIAO DIỆN CHÍNH ---
-st.title("⚽ Quản Lý Đội Bóng & Thống Kê Tháng")
+# --- GIAO DIỆN ---
+st.title("⚽ Quản Lý Tiền Sân Đội Bóng 2026")
 
-tab1, tab2 = st.tabs(["📝 Điểm danh theo ngày", "📊 Thống kê đóng tiền tháng"])
+tab1, tab2 = st.tabs(["📝 Điểm danh & Ghi chú", "📊 Thống kê tháng"])
 
-# TAB 1: ĐIỂM DANH HÀNG TUẦN
+# TAB 1: ĐIỂM DANH THEO NGÀY
 with tab1:
-    col_date, col_save = st.columns([2, 1])
-    with col_date:
-        selected_date = st.selectbox("Chọn ngày Thứ 4:", date_strings)
+    selected_date = st.selectbox("Chọn ngày Thứ 4:", wednesdays_2026)
     
-    # Hiển thị bảng chỉnh sửa
+    # Lọc dữ liệu ngày được chọn
+    df_today = df_master[df_master["Ngày"] == selected_date].copy()
+    
+    # Nếu ngày này hoàn toàn mới, tự động tạo danh sách mặc định
+    if df_today.empty:
+        df_today = pd.DataFrame({
+            "Ngày": [selected_date] * len(fixed_members),
+            "Thanh_vien": fixed_members,
+            "Trang_thai": [False] * len(fixed_members),
+            "Ghi_chu": [""] * len(fixed_members)
+        })
+
+    st.subheader(f"Danh sách đóng tiền ngày {selected_date}")
+    
+    # Bảng chỉnh sửa chính
     edited_df = st.data_editor(
-        st.session_state.df_ball[["Thành viên", selected_date, "Ghi chú"]],
+        df_today[["Thanh_vien", "Trang_thai", "Ghi_chu"]],
         column_config={
-            selected_date: st.column_config.CheckboxColumn("Đã đóng?"),
-            "Thành viên": st.column_config.TextColumn(disabled=True),
+            "Thanh_vien": st.column_config.TextColumn("Tên", disabled=True),
+            "Trang_thai": st.column_config.CheckboxColumn("Đã đóng?"),
+            "Ghi_chu": st.column_config.TextColumn("Ghi chú ngày này (Khách mời...)", width="large")
         },
         hide_index=True,
-        use_container_width=True
+        use_container_width=True,
+        key=f"editor_{selected_date}" # Key động theo ngày để tránh lẫn cache
     )
 
-    if st.button("Lưu dữ liệu ngày này"):
-        st.session_state.df_ball.update(edited_df)
-        st.success(f"Đã lưu trạng thái ngày {selected_date}")
+    # Thêm khách mời vãng lai
+    with st.expander("➕ Thêm khách/người đi thêm hôm nay"):
+        col_name, col_btn = st.columns([3, 1])
+        guest_name = col_name.text_input("Tên người đi thêm:", key="guest_input")
+        if col_btn.button("Thêm vào bảng"):
+            if guest_name:
+                new_row = pd.DataFrame({"Ngày": [selected_date], "Thanh_vien": [guest_name], "Trang_thai": [False], "Ghi_chu": ["Khách mời"]})
+                df_master = pd.concat([df_master, new_row], ignore_index=True)
+                st.rerun()
 
-# TAB 2: THỐNG KÊ THEO THÁNG
+    # NÚT LƯU - ĐẨY LÊN GOOGLE SHEETS
+    if st.button("💾 LƯU DỮ LIỆU VÀO GOOGLE SHEETS", type="primary"):
+        with st.spinner("Đang đồng bộ..."):
+            # Xóa bản ghi cũ của ngày này để ghi đè bản mới
+            df_final = df_master[df_master["Ngày"] != selected_date]
+            
+            # Lấy dữ liệu từ bảng vừa edit
+            df_new_today = edited_df.copy()
+            df_new_today["Ngày"] = selected_date
+            
+            # Gộp lại và lưu
+            df_save = pd.concat([df_final, df_new_today], ignore_index=True)
+            conn.update(worksheet="Data", data=df_save)
+            st.cache_data.clear()
+            st.success(f"Đã lưu thành công dữ liệu ngày {selected_date}!")
+
+# TAB 2: THỐNG KÊ THÁNG
 with tab2:
-    month_selected = st.selectbox("Chọn tháng cần xem:", range(1, 13), format_func=lambda x: f"Tháng {x}")
+    m_idx = datetime.now().month - 1
+    month = st.selectbox("Chọn tháng:", range(1, 13), format_func=lambda x: f"Tháng {x}", index=m_idx)
     
-    # Lọc các cột Thứ 4 thuộc tháng đã chọn
-    cols_in_month = [d.strftime('%d/%m/%Y') for d in all_wed_2026 if d.month == month_selected]
+    # Chuyển đổi cột Ngày sang datetime để lọc chính xác
+    df_master['Date_Obj'] = pd.to_datetime(df_master['Ngày'], format='%d/%m/%Y', errors='coerce')
+    df_month = df_master[df_master['Date_Obj'].dt.month == month]
     
-    if cols_in_month:
-        st.write(f"Trong tháng {month_selected} có {len(cols_in_month)} trận (ngày: {', '.join(cols_in_month)})")
+    if not df_month.empty:
+        summary = df_month.groupby("Thanh_vien").agg(
+            So_buoi=("Ngày", "count"),
+            Da_dong=("Trang_thai", "sum")
+        ).reset_index()
         
-        # Tính toán dữ liệu tháng
-        month_data = st.session_state.df_ball[["Thành viên"] + cols_in_month].copy()
+        summary["Còn nợ (buổi)"] = summary["So_buoi"] - summary["Da_dong"]
         
-        # Tạo cột "Số trận đã đóng"
-        month_data["Số trận đã đóng"] = month_data[cols_in_month].sum(axis=1)
+        st.write(f"### Báo cáo quỹ tháng {month}")
+        st.dataframe(summary.sort_values("Còn nợ (buổi)"), use_container_width=True, hide_index=True)
         
-        # Xác định ai đã hoàn thành nghĩa vụ tháng (đóng đủ tất cả các buổi)
-        full_paid = month_data[month_data["Số trận đã đóng"] == len(cols_in_month)]
-        not_full = month_data[month_data["Số trận đã đóng"] < len(cols_in_month)]
-
-        # Hiển thị Dashboard tháng
-        c1, c2 = st.columns(2)
-        with c1:
-            st.success(f"✅ Đã đóng đủ tháng ({len(full_paid)})")
-            if not full_paid.empty:
-                st.write(", ".join(full_paid["Thành viên"].tolist()))
-            else:
-                st.write("Chưa có ai đóng đủ.")
-
-        with c2:
-            st.error(f"⚠️ Chưa đóng đủ tháng ({len(not_full)})")
-            if not not_full.empty:
-                st.write(", ".join(not_full["Thành viên"].tolist()))
-        
-        st.markdown("---")
-        st.write("**Chi tiết đóng tiền trong tháng:**")
-        st.dataframe(month_data, hide_index=True, use_container_width=True)
+        st.write("📝 **Chi tiết ghi chú/khách mời tháng này:**")
+        st.dataframe(df_month[df_month["Ghi_chu"] != ""][["Ngày", "Thanh_vien", "Ghi_chu"]], hide_index=True)
     else:
-        st.warning("Không có dữ liệu cho tháng này.")
-
-# NÚT XUẤT FILE CHO DÂN DATA
-st.sidebar.markdown("### Quản lý dữ liệu")
-csv = st.session_state.df_ball.to_csv(index=False).encode('utf-8-sig')
-st.sidebar.download_button("📥 Tải File CSV Toàn Năm", data=csv, file_name='quy_bong_da_2026.csv')
+        st.info("Chưa có dữ liệu đóng tiền cho tháng này.")
